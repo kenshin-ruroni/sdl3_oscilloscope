@@ -42,7 +42,7 @@ int MAX_LAG = 882;
 int DISPLAY_SAMPLES = BUFFER_SIZE/2 - MAX_LAG;
 
 constexpr  uint32_t WINDOW_WIDTH = 800;
-constexpr  uint32_t WINDOW_HEIGHT = 800;
+constexpr  uint32_t WINDOW_HEIGHT = 600;
 
 std::vector<float> samples;
 
@@ -706,8 +706,7 @@ int main(int argc, char* argv[]) {
     SDL_UnlockTexture(texture);
     
     SDL_Event event;
-
-
+    
     std::vector<float> signal(256,0.); 
     std::deque<float> signal_queue(256,0.); 
     
@@ -779,19 +778,21 @@ int main(int argc, char* argv[]) {
 
         }
 
-        switch(current_window_idx)
+        if ( playback.load() == true)
         {
-            case 0:
+            switch(current_window_idx)
             {
-                GetTriggeredSamples(0.0f, true);
+                case 0:
+                {
+                    GetTriggeredSamples(0.0f, true);
+                }
+                break;
+                case 1:
+                {
+                    GetAutocorrectedSamples();
+                }
+                break;
             }
-            break;
-            case 1:
-            {
-
-                GetAutocorrectedSamples();
-            }
-            break;
         }
 
         // Dessin de l'interface
@@ -813,8 +814,8 @@ int main(int argc, char* argv[]) {
 
         float centerY_Left = 150.0f;
 for (int i = 0; i < DISPLAY_SAMPLES - 1; ++i) {
-    SDL_RenderLine(renderer, i * hWidth, centerY_Left - (output_left[i] * scale), 
-                             (i + 1) * hWidth, centerY_Left - (output_left[i + 1] * scale));
+    SDL_RenderLine(renderer, i * hWidth, centerY_Left - ( (output_left[i]*=0.995) * scale), 
+                             (i + 1) * hWidth, centerY_Left - ( (output_left[i + 1] *=0.995)* scale));
 }
 
 // --- CANAL DROIT (Moitié Inférieure : Centre Y = 450) ---
@@ -822,8 +823,8 @@ SDL_SetRenderDrawColor(renderer, 255, 128, 0, 255); // Orange pour la Droite
 float centerY_Right = 450.0f;
 for (int i = 0; i < DISPLAY_SAMPLES - 1; ++i) 
 {
-    SDL_RenderLine(renderer, i * hWidth, centerY_Right - (output_right[i] * scale), 
-                             (i + 1) * hWidth, centerY_Right - (output_right[i + 1] * scale));
+    SDL_RenderLine(renderer, i * hWidth, centerY_Right - ( (output_right[i]*=0.995) * scale), 
+                             (i + 1) * hWidth, centerY_Right - ( (output_right[i + 1]*=0.995) * scale));
 }
 
 
