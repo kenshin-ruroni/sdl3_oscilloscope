@@ -23,7 +23,7 @@
 
 #include "sse2_fft.h"
 
-#include "spectrogram_renderer.h"
+
 #include "imfilebrowser.h"
 
 #include <SDL3/SDL.h>
@@ -35,7 +35,14 @@
 // Configuration Audio / Visuelle
 
  int BUFFER_SIZE = 4096;       // Taille du tampon circulaire
- int DISPLAY_SAMPLES = 512;    // Nombre d'échantillons visibles à l'écran
+ // Nombre d'échantillons visibles à l'écran
+
+int MIN_LAG = 22;
+int MAX_LAG = 882;
+int DISPLAY_SAMPLES = BUFFER_SIZE/2 - MAX_LAG;
+
+constexpr  uint32_t WINDOW_WIDTH = 800;
+constexpr  uint32_t WINDOW_HEIGHT = 800;
 
 std::vector<float> samples;
 
@@ -356,13 +363,6 @@ static inline bool load_mp3_file(std::string &path,std::vector<float> *interleav
 
         }
 
-    // Tampons pour la FFT courante
-    std::vector<float> currentLeft = std::vector<float>(FFT_SIZE, 0.0f);
-    std::vector<float> currentRight = std::vector<float>(FFT_SIZE, 0.0f);
-    std::vector<std::complex<float>> fftLeft = std::vector<std::complex<float>>(FFT_SIZE); std::vector<std::complex<float>> fftRight = std::vector<std::complex<float>>(FFT_SIZE);
-
-    size_t paneHeight = WINDOW_HEIGHT / 2;
-
     // Fonction FFT Cooley-Tukey (identique)
 inline void fft(std::vector<std::complex<float>>* a) {
     int n = a->size();
@@ -383,37 +383,6 @@ inline void fft(std::vector<std::complex<float>>* a) {
 }
 
 constexpr float threshold = 1.;
-
-
-
-std::vector<uint32_t> pixelBuffer;
-    // Ajoute une nouvelle colonne de fréquences calculées et décale le reste de l'image
-    void addFFTFrame(const std::vector<float> *magnitudes) {
-        // 1. Décaler tous les pixels de la texture d'un pixel vers la gauche
-        for (int y = 0; y < WINDOW_HEIGHT; ++y) {
-            std::memmove(&pixelBuffer[y * WINDOW_WIDTH], &pixelBuffer[y * WINDOW_WIDTH + 1], (WINDOW_WIDTH - 1) * sizeof(uint32_t));
-        }
-
-        // 2. Dessiner la nouvelle colonne tout à droite (X = WINDOW_WIDTH - 1)
-        // L'axe Y représente les fréquences (Basses en bas, Hautes en haut)
-        for (int y = 0; y < WINDOW_HEIGHT; ++y) {
-            // Mapper la hauteur de l'écran sur la moitié utile de la FFT (frequences positives)
-            uint32_t fftBin = (WINDOW_HEIGHT - 1 - y) * (FFT_SIZE / 2) / WINDOW_HEIGHT;
-
-            size_t index = std::clamp(fftBin, (uint32_t)0, FFT_SIZE / 2 - 1);
-            float mag = (*magnitudes)[index];
-
-            // Normalisation de l'intensité lumineuse (application d'une échelle logarithmique)
-            float intensity = std::clamp(20.0f * std::log10(mag + 1.0f) * 10.0f, 0.0f, 255.0f);
-            uint8_t colorVal = static_cast<uint8_t>(intensity);
-
-            // Génération d'une palette de couleur (Ex: Dégradé de Vert)
-            uint32_t rgbaColor = (0x00 << 24) | (colorVal << 16) | (0x00 << 8) | 0xFF; // RGBA
-            
-            pixelBuffer[y * WINDOW_WIDTH + (WINDOW_WIDTH - 1)] = rgbaColor;
-        }
-        
-    }
 
     struct audio_file_data_t
     {
@@ -557,10 +526,6 @@ bool ImGuiPlayButton(const char* label_id, ImVec2 size) {
     return pressed;
 }
 
-// Paramètres de recherche pour l'autocorrélation
-// Adapté pour capturer des fréquences de 50 Hz à 2000 Hz à 44.1 kHz
-const int MIN_LAG = 22;   // ~2000 Hz (44100 / 22)
-const int MAX_LAG = 882;  // ~50 Hz  (44100 / 882)
 
 // Filtre de lissage (Passe-bas) pour aider l'autocorrélation sur les signaux très bruités
 std::vector<float> ApplyPreFilter(const std::vector<float> *input) {
@@ -620,6 +585,8 @@ std::vector<float> GetTriggeredSamples(float threshold, bool risingEdge) {
     return output;
 }
 
+
+
 int analysisSize = DISPLAY_SAMPLES + MAX_LAG;
 
 std::vector<float> rawLeft(BUFFER_SIZE/2);
@@ -627,6 +594,8 @@ std::vector<float> rawRight(BUFFER_SIZE/2);
 
 std::vector<float> output_left(DISPLAY_SAMPLES);
 std::vector<float> output_right(DISPLAY_SAMPLES);
+
+
 
 inline void  GetAutocorrectedSamples() 
 {
@@ -636,8 +605,6 @@ inline void  GetAutocorrectedSamples()
         rawLeft[k] = buffer[2 * k ], rawRight[k] = buffer[2 * k + 1];
     }
 
-    const int MIN_LAG = 22;
-    const int MAX_LAG = 882;
 
 
     // 2. Calcul de l'autocorrélation sur le canal GAUCHE uniquement (Référence)
@@ -731,8 +698,6 @@ int main(int argc, char* argv[]) {
     ImGui_ImplSDL3_InitForSDLRenderer(window_ui, renderer_ui);
     ImGui_ImplSDLRenderer3_Init(renderer_ui);
 
-    spectrogram_renderer spectrogram(renderer,texture);
-
     SDL_Surface *surface =  SDL_GetWindowSurface(window);
 
     int pitch;
@@ -740,14 +705,9 @@ int main(int argc, char* argv[]) {
     SDL_LockTexture(texture, nullptr, &pixels, &pitch);
     SDL_UnlockTexture(texture);
     
-    
-
     SDL_Event event;
 
 
-
-
-    
     std::vector<float> signal(256,0.); 
     std::deque<float> signal_queue(256,0.); 
     
