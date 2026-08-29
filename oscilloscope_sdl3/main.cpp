@@ -35,7 +35,7 @@
 
 // Configuration Audio / Visuelle
 
- int BUFFER_SIZE = 4096;       // Taille du tampon circulaire
+ int BUFFER_SIZE = 16384;       // Taille du tampon circulaire
  // Nombre d'échantillons visibles à l'écran
 
 int MIN_LAG = 22;
@@ -800,6 +800,31 @@ trigger_t find_corrscope_trigger()
     return {best_offset_left, max_val_left,best_offset_right, max_val_right};
 }
 
+inline int apply_zero_crossing_post_trigger(const std::vector<float> *searchRegion, int fftOffset, int radius) {
+
+    
+    // S'assurer de ne pas déborder de la zone de recherche
+    int startSearch = std::max(0, fftOffset - radius);
+    int endSearch   = std::min(SEARCH_SIZE - 2, fftOffset + radius);
+
+    int best_offset = fftOffset;
+    float minDistanceToZero = std::numeric_limits<float>::infinity();
+
+    // Recherche d'un passage par zéro de type flanc montant : échantillon[i] <= 0 et échantillon[i+1] > 0
+    for (int i = startSearch; i < endSearch; ++i) {
+        if ( (*searchRegion)[i] <= 0.0f && (*searchRegion)[i + 1] > 0.0f) {
+            // Calcule la distance par rapport à l'estimation brute de la FFT
+            float distance = std::abs(i - fftOffset);
+            if (distance < minDistanceToZero) {
+                minDistanceToZero = distance;
+                best_offset = i; // Verrouillage de la position exacte
+            }
+        }
+    }
+
+    return best_offset;
+}
+
 inline void fft_cross_correlation(float center_y_left,float center_y_right,float scale)
 {
 
@@ -816,28 +841,33 @@ inline void fft_cross_correlation(float center_y_left,float center_y_right,float
 
         trigger_t trigger = playback.load() == true ?  find_corrscope_trigger() : trigger_t{0,0.f,0,0.f};
 
+        int final_offset_left  = apply_zero_crossing_post_trigger(&search_left, trigger.best_offset_left, 32);
+        int final_offset_right = apply_zero_crossing_post_trigger(&search_right, trigger.best_offset_right, 32);
+
 
         float xStep = (float)WINDOW_WIDTH / REF_SIZE;
 
 
         int audio_index;
-
+        float alpha = 0.15f;    
         for (int i = 0; i < REF_SIZE; ++i) 
         {
 
-                audio_index = trigger.best_offset_left + i;
+                audio_index = final_offset_left + i;
                 // Sécurité contre les débordements de tampons
                 sample = (audio_index < (int)search_left.size()) ? search_left[audio_index] : 0.0f;
 
                 fft_cc_render_points_left[i].x = i * xStep;
                 fft_cc_render_points_left[i].y = center_y_left - (sample * scale);
                 history_left[i] = sample;
+                history_left[i] = (history_left[i] * (1.0f - alpha)) + (sample * alpha);
 
-                audio_index = trigger.best_offset_right + i;
+                audio_index = final_offset_right + i;
                 sample = (audio_index < (int)search_right.size()) ? search_right[audio_index] : 0.0f;
                 fft_cc_render_points_right[i].x = i * xStep;
                 fft_cc_render_points_right[i].y = center_y_right - (sample * scale);
                 history_right[i] = sample;
+                history_right[i] = (history_right[i] * (1.0f - alpha)) + (sample * alpha);
         }
 
         
@@ -874,6 +904,8 @@ int main(int argc, char* argv[]) {
     {
         return -1;
     }
+
+    SDL_SetRenderVSync(renderer, 1); 
 
     SDL_Texture*  texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_STREAMING, WINDOW_WIDTH, WINDOW_HEIGHT);
 
