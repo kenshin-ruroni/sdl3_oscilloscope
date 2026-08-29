@@ -804,39 +804,43 @@ inline void fft_cross_correlation(float center_y_left,float center_y_right,float
 {
 
     // Extraction de la région de recherche de notre flux
-        
+        float sample;
         for (int i = 0; i < SEARCH_SIZE; ++i) 
         {
-            search_left[i]  = buffer[2 * i];
-            search_right[i] = buffer[2 * i + 1];
+            sample = search_left[i] ;
+            search_left[i]  = playback.load() == true ? buffer[2 * i] : sample * 0.995 ;
+            sample = search_right[i] ;
+            search_right[i] = playback.load() == true ?buffer[2 * i + 1] : sample * 0.995 ;
         }
+        
 
-        // 4. Calcul de l'alignement via Corrscope
-        trigger_t trigger = find_corrscope_trigger();
+        trigger_t trigger = playback.load() == true ?  find_corrscope_trigger() : trigger_t{0,0.f,0,0.f};
 
-        // 5. Remplissage des coordonnées graphiques alignées
+
         float xStep = (float)WINDOW_WIDTH / REF_SIZE;
 
-        float sample;
+
         int audio_index;
 
         for (int i = 0; i < REF_SIZE; ++i) 
         {
-            audio_index = trigger.best_offset_left + i;
-            
-            // Sécurité contre les débordements de tampons
-            sample = (audio_index < (int)search_left.size()) ? search_left[audio_index] : 0.0f;
 
-            fft_cc_render_points_left[i].x = i * xStep;fft_cc_render_points_left[i].x *= 0.995;
-            fft_cc_render_points_left[i].y = center_y_left - (sample * scale);fft_cc_render_points_left[i].y *= 0.995;
-            history_left[i] = sample;
+                audio_index = trigger.best_offset_left + i;
+                // Sécurité contre les débordements de tampons
+                sample = (audio_index < (int)search_left.size()) ? search_left[audio_index] : 0.0f;
 
-            audio_index = trigger.best_offset_right + i;
-            sample = (audio_index < (int)search_right.size()) ? search_right[audio_index] : 0.0f;
-            fft_cc_render_points_right[i].x = i * xStep;fft_cc_render_points_right[i].x *= 0.995;
-            fft_cc_render_points_right[i].y = center_y_right - (sample * scale);fft_cc_render_points_right[i].y *=0.995;
-            history_right[i] = sample;
+                fft_cc_render_points_left[i].x = i * xStep;
+                fft_cc_render_points_left[i].y = center_y_left - (sample * scale);
+                history_left[i] = sample;
+
+                audio_index = trigger.best_offset_right + i;
+                sample = (audio_index < (int)search_right.size()) ? search_right[audio_index] : 0.0f;
+                fft_cc_render_points_right[i].x = i * xStep;
+                fft_cc_render_points_right[i].y = center_y_right - (sample * scale);
+                history_right[i] = sample;
         }
+
+        
 
 }
 
@@ -1021,8 +1025,7 @@ int main(int argc, char* argv[]) {
         
 
 
-        if ( playback.load() == true)
-        {
+        
             switch(current_visualizer_style_idx)
             {
                 case 0:
@@ -1032,7 +1035,10 @@ int main(int argc, char* argv[]) {
                 break;
                 case 1:
                 {
-                    get_autocorrected_samples();
+                    if ( playback.load() == true)
+                    {
+                        get_autocorrected_samples();
+                    }
                             
                     SDL_SetRenderDrawColor(renderer, 0, 255, 128, 255);
                     for (int i = 0; i < DISPLAY_SAMPLES - 1; ++i) {
@@ -1047,6 +1053,7 @@ int main(int argc, char* argv[]) {
                                                 (i + 1) * hWidth, center_y_right - ( (output_right[i + 1]*=0.995) * scale));
                     }
                 }
+                break;
                 case 2:
                 {
                     fft_cross_correlation(center_y_left, center_y_right, scale);
@@ -1066,7 +1073,7 @@ int main(int argc, char* argv[]) {
                 }
                 break;
             }
-        }
+        
 
         SDL_RenderPresent(renderer);
 
