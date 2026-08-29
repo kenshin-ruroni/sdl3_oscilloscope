@@ -27,6 +27,10 @@
 
 #include "imfilebrowser.h"
 
+extern "C" {
+    #include "reverb.h" // Adaptez au nom réel de votre fichier d'en-tête
+}
+
 #include <SDL3/SDL.h>
 #include <vector>
 #include <mutex>
@@ -35,7 +39,7 @@
 
 // Configuration Audio / Visuelle
 
- int BUFFER_SIZE = 16384;       // Taille du tampon circulaire
+ int BUFFER_SIZE = 8192;       // Taille du tampon circulaire
  // Nombre d'échantillons visibles à l'écran
 
 int MIN_LAG = 22;
@@ -473,7 +477,8 @@ constexpr float threshold = 1.;
         }, path, samples).detach();
     };
 
-bool ImGuiStopButton(const char* str_id, ImVec2 size) {
+bool ImGuiStopButton(const char* str_id, ImVec2 size) 
+{
     ImGuiContext& g = *GImGui;
     ImGuiWindow* window = ImGui::GetCurrentWindow();
     if (window->SkipItems) return false;
@@ -503,6 +508,127 @@ bool ImGuiStopButton(const char* str_id, ImVec2 size) {
     window->DrawList->AddRectFilled(stop_min, stop_max, icon_col);
 
     return pressed;
+}
+
+bool KnobDial(const char* label, float* p_value, float v_min, float v_max, float radius = 20.0f, int major_ticks = 5, int sub_ticks_per_division = 3) {
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (window->SkipItems) return false;
+
+    ImGuiContext& g = *GImGui;
+    const ImGuiStyle& style = g.Style;
+    const ImGuiID id = window->GetID(label);
+
+    float line_height = ImGui::GetTextLineHeight();
+    float tick_padding = 6.0f; 
+    ImVec2 total_size = ImVec2((radius + tick_padding) * 2.0f, ((radius + tick_padding) * 2.0f) + line_height + style.ItemInnerSpacing.y);
+    ImVec2 pos = window->DC.CursorPos;
+    ImRect total_bb(pos, ImVec2(pos.x + total_size.x, pos.y + total_size.y));
+
+    ImGui::ItemSize(total_bb, style.ItemSpacing.y);
+    if (!ImGui::ItemAdd(total_bb, id)) return false;
+
+    ImGui::SetNextItemAllowOverlap(); 
+
+    // Calcul du nombre total d'intervalles (divisions) pour le snapping
+    int total_divisions = (major_ticks > 1) ? (major_ticks - 1) * (sub_ticks_per_division + 1) : 1;
+    float range = v_max - v_min;
+    float step_size = range / (float)total_divisions;
+
+    // 1. Logique d'interaction
+    bool hovered, held;
+    bool pressed = ImGui::ButtonBehavior(total_bb, id, &hovered, &held);
+    
+    if (pressed) {
+        ImGui::SetKeyboardFocusHere(-1);
+    }
+    bool is_focused = ImGui::IsItemFocused();
+    bool value_changed = false;
+
+    // Ajustement continu à la souris
+    if (held && g.IO.MouseDelta.x != 0.0f) {
+        // Sensibilité dépendante de la plage totale
+        *p_value += range * 0.005f * g.IO.MouseDelta.x;
+        value_changed = true;
+    }
+
+    // Ajustement par pallier d'un tick complet au clavier
+    if (is_focused) {
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_DownArrow)) {
+            *p_value -= step_size;
+            value_changed = true;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) || ImGui::IsKeyPressed(ImGuiKey_UpArrow)) {
+            *p_value += step_size;
+            value_changed = true;
+        }
+    }
+
+    // APPLICATION DU SNAPPING (Uniquement si la valeur a bougé)
+    if (value_changed) {
+        // Clamping préventif
+        if (*p_value < v_min) *p_value = v_min;
+        if (*p_value > v_max) *p_value = v_max;
+
+        // Formule mathématique pour forcer l'alignement sur l'étape la plus proche
+        float snap_t = std::round((*p_value - v_min) / step_size);
+        *p_value = v_min + (snap_t * step_size);
+    }
+
+    // 2. Configuration Géométrique
+    float t = (*p_value - v_min) / range;
+    float angle_min = 3.14159265f * 0.75f; 
+    float angle_max = 3.14159265f * 2.25f; 
+    float angle = angle_min + (angle_max - angle_min) * t;
+
+    ImVec2 center = ImVec2(pos.x + radius + tick_padding, pos.y + radius + tick_padding);
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+    ImU32 col_bg = ImGui::GetColorU32(hovered ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg);
+    ImU32 col_active = ImGui::GetColorU32(ImGuiCol_SliderGrabActive);
+    ImU32 col_text = ImGui::GetColorU32(ImGuiCol_Text);
+    ImU32 col_tick = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+
+    // 3. Rendu des Ticks
+    if (major_ticks > 1) {
+        for (int i = 0; i <= total_divisions; ++i) {
+            float tick_t = (float)i / (float)total_divisions;
+            float tick_angle = angle_min + (angle_max - angle_min) * tick_t;
+            bool is_major = (i % (sub_ticks_per_division + 1) == 0);
+            
+            float inner_r = radius + 1.0f;
+            float outer_r = radius + (is_major ? 5.0f : 3.0f);
+            float thickness = is_major ? 1.5f : 1.0f;
+
+            ImVec2 tick_start = ImVec2(center.x + std::cos(tick_angle) * inner_r, center.y + std::sin(tick_angle) * inner_r);
+            ImVec2 tick_end   = ImVec2(center.x + std::cos(tick_angle) * outer_r, center.y + std::sin(tick_angle) * outer_r);
+            draw_list->AddLine(tick_start, tick_end, col_tick, thickness);
+        }
+    }
+
+    // 4. Rendu du corps du bouton
+    if (is_focused) {
+        draw_list->AddCircle(center, radius + 2.0f, ImGui::GetColorU32(ImGuiCol_NavHighlight), 32, 1.5f);
+    }
+
+    draw_list->AddCircleFilled(center, radius, col_bg, 32);
+
+    // Arc de sélection externe actif
+    draw_list->PathArcTo(center, radius - 2.0f, angle_min, angle, 32);
+    draw_list->PathStroke(col_active, 0, 3.0f);
+
+    // 5. Rendu de la valeur au centre
+    char value_buf[32];
+    std::snprintf(value_buf, sizeof(value_buf), "%.1f", *p_value); 
+    ImVec2 value_size = ImGui::CalcTextSize(value_buf);
+    ImVec2 value_pos = ImVec2(center.x - value_size.x * 0.5f, center.y - value_size.y * 0.5f);
+    
+    draw_list->AddText(value_pos, col_text, value_buf);
+
+    // Rendu du label centré sous le widget
+    ImVec2 label_pos = ImVec2(center.x - ImGui::CalcTextSize(label).x * 0.5f, pos.y + ((radius + tick_padding) * 2.0f) + style.ItemInnerSpacing.y);
+    draw_list->AddText(label_pos, col_text, label);
+
+    return value_changed;
 }
 
 bool ImGuiPlayButton(const char* label_id, ImVec2 size) {
@@ -643,7 +769,7 @@ inline void  get_autocorrected_samples()
 
 }
 
- int REF_SIZE = BUFFER_SIZE/2;         // Taille du motif stable recherché
+ int REF_SIZE = BUFFER_SIZE/4;         // Taille du motif stable recherché
 
 
  int SEARCH_SIZE = BUFFER_SIZE/2;     // Fenêtre globale d'analyse audio
@@ -875,6 +1001,51 @@ inline void fft_cross_correlation(float center_y_left,float center_y_right,float
 }
 
 
+typedef void (*apply_filter)(void *filter_pointer,float *sample_L,float *sample_R);
+
+struct filter_combo_item_t
+{
+    const char* label;
+    bool is_selected;
+};
+
+struct reverb_filter_t
+{
+     sf_reverb_state_st rv;
+
+     inline void set_sample_rate(int sample_rate)
+     {
+        sf_presetreverb(&rv, sample_rate, SF_REVERB_PRESET_DEFAULT);
+     }
+     sf_sample_st sample_in;
+     sf_sample_st sample_out;
+     inline void process(float *sample_L, float *sample_R)
+     {
+        sample_in = sf_sample_st{ *sample_L,*sample_R};
+        sf_reverb_process(&rv, 2, &sample_in, &sample_out);
+        *sample_L = sample_out.L;
+        *sample_R = sample_out.R;
+     }
+};
+
+reverb_filter_t reverb_filter;
+
+static inline void apply_reverb(void *filter_pointer,float *sample_L,float *sample_R)
+{
+   reverb_filter_t *reverb_filter = (reverb_filter_t *)filter_pointer;
+   reverb_filter->process(sample_L,sample_R);
+
+}
+
+inline void update_data_from_loaded_file(int id_selectionne)
+{
+    // reset sample rate for filter
+    reverb_filter.set_sample_rate(sample_rate.load() );
+    // copy audio data to samples vector
+    samples.resize(songs[id_selectionne].samples.size());
+    memcpy(samples.data(),songs[id_selectionne].samples.data(), songs[id_selectionne].samples.size() * sizeof(float) );
+
+}
 
 int main(int argc, char* argv[]) {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) 
@@ -926,6 +1097,9 @@ int main(int argc, char* argv[]) {
 
 
     static ImGui::FileBrowser fileDialog(ImGuiFileBrowserFlags_CloseOnEsc);
+
+    fileDialog.SetTitle("Choisir un fichier audio (.wav, .flac, .mp3)");
+    fileDialog.SetTypeFilters({ ".wav", ".mp3", ".flac" });
 
 // Variable pour stocker le chemin du fichier audio ou de configuration choisi
     static std::string selected_file_path = "Aucun fichier sélectionné";
@@ -990,7 +1164,9 @@ int main(int argc, char* argv[]) {
     bool running = true;
 
 
-    // Index de l'élément actuellement sélectionné (à déclarer en variable persistante/globale)
+    float pitch_value = 1.;
+
+
     static int current_visualizer_style_idx = 0; 
 
     static int current_window_type_idx = 0; 
@@ -1010,6 +1186,24 @@ int main(int argc, char* argv[]) {
         float scale = 200.0f; // Hauteur de l'onde à l'écran
         float center_y_left = 150.0f;
         float center_y_right = 450.0f;
+
+        std::string filters_preview_text = "";
+        int filters_selected_count = 0;
+
+        struct filter_combo_item_t
+        {
+            const char* label;
+            bool is_selected;
+        };
+
+        static std::vector<filter_combo_item_t> filters_items = {
+            { "reverb", false }
+        };
+        std::unordered_map<const char *, apply_filter > filters_map=
+        {
+            {"reverb", &apply_reverb}
+        };
+
 
     while (running) {
         while (SDL_PollEvent(&event)) 
@@ -1148,6 +1342,42 @@ int main(int argc, char* argv[]) {
         }
         ImGui::Separator();
         ImGui::Spacing();
+        if ( KnobDial("pitch",&pitch_value,0.25,5.) )
+        {
+            //pitch shift
+        }
+        ImGui::SameLine();
+
+        // filters combox box with checkbox items
+        filters_selected_count = 0;
+        for (const auto& item : filters_items) {
+            if (item.is_selected) {
+                filters_selected_count++;
+                if (!filters_preview_text.empty()) filters_preview_text += ", ";
+                filters_preview_text += item.label;
+            }
+        }
+
+        if (filters_selected_count == 0) {
+            filters_preview_text = "Aucun filtre sélectionné";
+        } else if (filters_preview_text.length() > 25) { // Évite que le texte dépasse du widget
+            filters_preview_text = std::to_string(filters_selected_count) + " éléments cochés";
+        }
+
+        // 2. Rendu du Combo avec l'aperçu dynamique
+        if (ImGui::BeginCombo("Filtres", filters_preview_text.c_str())) {
+            for (size_t i = 0; i < filters_items.size(); ++i) {
+                ImGui::PushID((int)i);
+                if (ImGui::Checkbox(filters_items[i].label, &filters_items[i].is_selected)) 
+                {
+                    // Optionnel : Déclencher un événement unique ici si nécessaire
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+
+
         ImGui::Separator();
         
         // if capture to playback not selected
@@ -1158,8 +1388,7 @@ int main(int argc, char* argv[]) {
             // 2. Bouton pour ouvrir l'explorateur
             if (ImGui::Button("open audio file...")) {
                 // Configurer le titre et les extensions autorisées
-                fileDialog.SetTitle("Choisir un fichier audio (.wav, .flac, .mp3)");
-                fileDialog.SetTypeFilters({ ".wav", ".mp3", ".flac" });
+                
                 
                 // Ouvrir la boîte de dialogue
                 fileDialog.Open();
@@ -1395,6 +1624,11 @@ int main(int argc, char* argv[]) {
                 // !ImGui::IsItemToggledOpen() évite de sélectionner l'élément si on clique juste sur la flèche
                 if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
                     id_selectionne = id;
+
+                    if ( playback.load( ) == false )
+                    {
+                        update_data_from_loaded_file(id_selectionne);
+                    }
                 }
 
                 // --- DEBUT DU MENU CONTEXTUEL (CLIC DROIT) ---
@@ -1402,8 +1636,14 @@ int main(int argc, char* argv[]) {
                 if (ImGui::BeginPopupContextItem()) 
                 {
                     // Option de sélection rapide au clic droit
-                    if (ImGui::MenuItem("Sélectionner")) {
+                    if (ImGui::MenuItem("Sélectionner")) 
+                    {
                         id_selectionne = id;
+
+                        if ( playback.load( ) == false )
+                        {
+                            update_data_from_loaded_file(id_selectionne);
+                        }
                     }
                     
                     ImGui::Separator();

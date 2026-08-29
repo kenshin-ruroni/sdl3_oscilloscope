@@ -47,10 +47,6 @@ set(IMGUI_SOURCES
     imfilebrowser.h
 )
 
-set(kissfft_SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps/kissfft-src )
-
-
-set( KISSFFT_SOURCES   ${kissfft_SOURCE_DIR}/kiss_fft.h ${kissfft_SOURCE_DIR}/kiss_fft.c)
 
 
 if (MSVC)
@@ -80,14 +76,29 @@ set(PROJECT_SOURCES
         dr_libs/dr_flac.h 
         dr_libs/dr_mp3.h 
         dr_libs/dr_wav.h
+        reverb.c
+        reverb.h
+        mem.c
+        mem.h
 )
 
 #find_package(OpenGL REQUIRED)
 
 
-add_executable(${PROJECT_NAME} ${PROJECT_SOURCES} ${IMGUI_SOURCES} ${KISSFFT_SOURCES} )
+
+add_executable(${PROJECT_NAME} ${PROJECT_SOURCES} ${IMGUI_SOURCES}  )
 
 #target_link_libraries(${PROJECT_NAME} PRIVATE OpenGL::GL)
+
+set(kissfft_SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps/kissfft-src )
+
+add_library(kissfft_lib STATIC 
+     ${kissfft_SOURCE_DIR}/kiss_fft.c
+)
+target_compile_definitions(kissfft_lib PUBLIC kiss_fft_scalar=float )
+target_compile_definitions(kissfft_lib PUBLIC KISSFFT_DATATYPE=simd KISSFFT_USE_ALLOCA=1)
+
+target_link_libraries(${PROJECT_NAME} PRIVATE kissfft_lib)
 
 if (MSVC)
 
@@ -101,7 +112,8 @@ endif()
 
 if(LINUX)
 
-        add_compile_options(-msse2 -lpthread -lm -march=native -mfma  )
+        add_compile_options(${PROJECT_NAME}  -msse2 -lpthread -lm -march=native -mfma -mavx2  -ffast-math )
+        add_compile_options( kissfft_lib -msse2 -lpthread -lm -march=native -mfma -mavx2  -ffast-math )
         target_include_directories(${PROJECT_NAME} PUBLIC  /usr/local/include ./build/_deps/imgui-src ./build/_deps/imgui-src/backends ./build/_deps/kissfft-src)  
         target_link_directories(${PROJECT_NAME} PUBLIC . )
         target_link_libraries( ${PROJECT_NAME} PRIVATE  ${CMAKE_SOURCE_DIR}/libSDL3.a ) # SDL3
