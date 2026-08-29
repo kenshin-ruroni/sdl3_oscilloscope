@@ -2,6 +2,7 @@
 #include <chrono>
 #include <functional> // Requis pour std::hash
 #include <unordered_map>
+#include <unordered_set>
 #include <stdint.h>
 
 #define DR_WAV_IMPLEMENTATION
@@ -1204,6 +1205,9 @@ int main(int argc, char* argv[]) {
             {"reverb", &apply_reverb}
         };
 
+        std::unordered_set<const char *> active_filters;
+
+
 
     while (running) {
         while (SDL_PollEvent(&event)) 
@@ -1370,8 +1374,20 @@ int main(int argc, char* argv[]) {
                 ImGui::PushID((int)i);
                 if (ImGui::Checkbox(filters_items[i].label, &filters_items[i].is_selected)) 
                 {
-                    // Optionnel : Déclencher un événement unique ici si nécessaire
+                    if ( filters_items[i].is_selected )
+                    {
+                        active_filters.emplace(filters_items[i].label);
+                    }
+                    else
+                    {
+                        auto it = active_filters.find(filters_items[i].label);
+                        if( it != active_filters.end() )
+                        {
+                            active_filters.erase(it);
+                        }
+                    }
                 }
+                
                 ImGui::PopID();
             }
             ImGui::EndCombo();
