@@ -20,6 +20,18 @@ else()
     FetchContent_MakeAvailable(imgui)
 endif()
 
+if(EXISTS "./_builds/_deps/imgui-build" AND IS_DIRECTORY "./_builds/_deps/imgui-build")
+    message(STATUS "kiss fft found!")
+else()
+    include(FetchContent)
+    message(STATUS "Téléchargement de kiss fft depuis GitHub...")
+    FetchContent_Declare(
+            kissfft
+            GIT_REPOSITORY https://github.com/mborgerding/kissfft.git
+            GIT_TAG        master 
+        )
+    FetchContent_MakeAvailable(kissfft)
+endif()
 
 set(imgui_SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps/imgui-src )
 
@@ -34,6 +46,11 @@ set(IMGUI_SOURCES
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlrenderer3.cpp
     imfilebrowser.h
 )
+
+set(kissfft_SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps/kissfft-src )
+
+
+set( KISSFFT_SOURCES   ${kissfft_SOURCE_DIR}/kiss_fft.h ${kissfft_SOURCE_DIR}/kiss_fft.c)
 
 
 if (MSVC)
@@ -68,7 +85,7 @@ set(PROJECT_SOURCES
 #find_package(OpenGL REQUIRED)
 
 
-add_executable(${PROJECT_NAME} main.cpp ${IMGUI_SOURCES} )
+add_executable(${PROJECT_NAME} ${PROJECT_SOURCES} ${IMGUI_SOURCES} ${KISSFFT_SOURCES} )
 
 #target_link_libraries(${PROJECT_NAME} PRIVATE OpenGL::GL)
 
@@ -85,7 +102,7 @@ endif()
 if(LINUX)
 
         add_compile_options(-msse2 -lpthread -lm -march=native -mfma  )
-        target_include_directories(${PROJECT_NAME} PUBLIC  /usr/local/include ./build/_deps/imgui-src ./build/_deps/imgui-src/backends )  
+        target_include_directories(${PROJECT_NAME} PUBLIC  /usr/local/include ./build/_deps/imgui-src ./build/_deps/imgui-src/backends ./build/_deps/kissfft-src)  
         target_link_directories(${PROJECT_NAME} PUBLIC . )
         target_link_libraries( ${PROJECT_NAME} PRIVATE  ${CMAKE_SOURCE_DIR}/libSDL3.a ) # SDL3
 

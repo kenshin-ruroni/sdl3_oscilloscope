@@ -23,6 +23,7 @@
 
 #include "sse2_fft.h"
 
+#include "kiss_fft.h"
 
 #include "imfilebrowser.h"
 
@@ -597,7 +598,7 @@ std::vector<float> output_right(DISPLAY_SAMPLES);
 
 
 
-inline void  GetAutocorrectedSamples() 
+inline void  get_autocorrected_samples() 
 {
 
     for (size_t k = 0; k < buffer.size()/2;k++)
@@ -642,12 +643,220 @@ inline void  GetAutocorrectedSamples()
 
 }
 
+ int REF_SIZE = BUFFER_SIZE/2;         // Taille du motif stable recherché
+
+
+ int SEARCH_SIZE = BUFFER_SIZE/2;     // Fenêtre globale d'analyse audio
+
+std::vector<float> window_hann;
+std::vector<float> *generate_hann_window(int size) 
+{
+    window_hann.resize(size);
+    for (int i = 0; i < size; ++i) {
+        window_hann[i] = 0.5f * (1.0f - std::cos(2.0f * M_PI * i / (size - 1)));
+    }
+    return &window_hann;
+}
+
+std::vector<float> window_hamming;
+std::vector<float> *generate_hamming_window(int size) 
+{
+    window_hamming.resize(size);
+    for (int i = 0; i < size; ++i) {
+        window_hamming[i] = 0.54f - 0.46f * std::cos(2.0f * M_PI * i / (size - 1));
+    }
+    return &window_hamming;
+}
+
+/**
+ * @brief Génère les coefficients d'une fenêtre de Blackman exacte.
+ * Formule : w(i) = 0.42 - 0.5 * cos(2*pi*i / (N-1)) + 0.08 * cos(4*pi*i / (N-1))
+ */
+std::vector<float> window_blackman;
+std::vector<float> *generate_blackman_window(int size) 
+{
+    window_blackman.resize(size);
+    for (int i = 0; i < size; ++i) {
+        float alpha = 2.0f * M_PI * i / (size - 1);
+        window_blackman[i] = 0.42f - 0.50f * std::cos(alpha) + 0.08f * std::cos(2.0f * alpha);
+    }
+    return &window_blackman;
+}
+
+ enum class window_type  {hann,hamming,blackman};
+
+/**
+ * @brief Algorithme d'alignement de Corrscope basé sur la corrélation croisée FFT.
+ */
+
+    struct trigger_t {
+        int best_offset_left;
+        float max_correlation_left;
+        int best_offset_right;
+        float max_correlation_right;
+    };
+
+    inline int next_power_of_two(int n) 
+    {
+        int count = 1;
+        if (n && !(n & (n - 1))) return n;
+        while (count < n) count <<= 1;
+        return count;
+    }
+
+    int fftSize = next_power_of_two(REF_SIZE + SEARCH_SIZE);
+
+  std::vector<float>  history_left = std::vector<float>(REF_SIZE, 0.0f),  history_right = std::vector<float>(REF_SIZE, 0.0f), 
+  search_left= std::vector<float>(SEARCH_SIZE, 0.0f), search_right= std::vector<float>(SEARCH_SIZE, 0.0f);
+  std::vector<float> *current_window_type = nullptr;
+  std::vector<SDL_FPoint> fft_cc_render_points_left(REF_SIZE);
+    std::vector<SDL_FPoint> fft_cc_render_points_right(REF_SIZE);
+
+    std::vector<kiss_fft_cpx> in_ref_left = std::vector<kiss_fft_cpx>(fftSize, {0.0f, 0.0f});
+     std::vector<kiss_fft_cpx> in_ref_right = std::vector<kiss_fft_cpx>(fftSize, {0.0f, 0.0f});
+
+    std::vector<kiss_fft_cpx> in_search_left = std::vector<kiss_fft_cpx>(fftSize, {0.0f, 0.0f});
+    std::vector<kiss_fft_cpx> in_search_right = std::vector<kiss_fft_cpx>(fftSize, {0.0f, 0.0f});
+
+        std::vector<kiss_fft_cpx> out_ref_left = std::vector<kiss_fft_cpx>(fftSize, {0.0f, 0.0f});
+    std::vector<kiss_fft_cpx> out_ref_right    = std::vector<kiss_fft_cpx>(fftSize, {0.0f, 0.0f});
+
+    std::vector<kiss_fft_cpx> out_search_left  = std::vector<kiss_fft_cpx>(fftSize, {0.0f, 0.0f});
+    std::vector<kiss_fft_cpx> out_search_right = std::vector<kiss_fft_cpx>(fftSize, {0.0f, 0.0f});
+
+    std::vector<kiss_fft_cpx> out_freq_product_left = std::vector<kiss_fft_cpx>(fftSize, {0.0f, 0.0f});
+    std::vector<kiss_fft_cpx> out_time_left_result  = std::vector<kiss_fft_cpx>(fftSize, {0.0f, 0.0f});
+
+    std::vector<kiss_fft_cpx> out_freq_product_right = std::vector<kiss_fft_cpx>(fftSize, {0.0f, 0.0f});
+    std::vector<kiss_fft_cpx> out_time_right_result  = std::vector<kiss_fft_cpx>(fftSize, {0.0f, 0.0f});
+
+
+
+trigger_t find_corrscope_trigger() 
+{
+
+    kiss_fft_cfg forward_cfg_left = kiss_fft_alloc(fftSize, 0, nullptr, nullptr);
+    kiss_fft_cfg inverse_cfg_left = kiss_fft_alloc(fftSize, 1, nullptr, nullptr);
+
+    kiss_fft_cfg forward_cfg_right = kiss_fft_alloc(fftSize, 0, nullptr, nullptr);
+    kiss_fft_cfg inverse_cfg_right = kiss_fft_alloc(fftSize, 1, nullptr, nullptr);
+
+    // Appliquer la fenêtre de Hann et inverser temporellement pour la corrélation
+    for (int i = 0; i < REF_SIZE; ++i) {
+        in_ref_left[i].r  = history_left [REF_SIZE - 1 - i] * (*current_window_type)[i]; 
+        in_ref_right[i].r = history_right [REF_SIZE - 1 - i] * (*current_window_type)[i]; 
+
+    }
+    for (int i = 0; i < SEARCH_SIZE; ++i) {
+        in_search_left[i].r = search_left[i];
+        in_search_right[i].r = search_right[i];
+    }
+
+    kiss_fft(forward_cfg_left, in_ref_left.data(), out_ref_left.data());
+    kiss_fft(forward_cfg_left, in_search_left.data(), out_search_left.data());
+
+    kiss_fft(forward_cfg_right, in_ref_right.data(), out_ref_right.data());
+    kiss_fft(forward_cfg_right, in_search_right.data(), out_search_right.data());
+
+    // Multiplication complexe
+    for (int i = 0; i < fftSize; ++i) {
+        out_freq_product_left[i].r = out_ref_left[i].r * out_search_left[i].r - out_ref_left[i].i * out_search_left[i].i;
+        out_freq_product_left[i].i = out_ref_left[i].r * out_search_left[i].i + out_ref_left[i].i * out_search_left[i].r;
+        out_freq_product_right[i].r = out_ref_right[i].r * out_search_right[i].r - out_ref_right[i].i * out_search_right[i].i;
+        out_freq_product_right[i].i = out_ref_right[i].r * out_search_right[i].i + out_ref_right[i].i * out_search_right[i].r;
+    }
+
+    kiss_fft(inverse_cfg_left, out_freq_product_left.data(), out_time_left_result.data());
+
+    int best_offset_left = 0, best_offset_right = 0;
+    float max_val_left = -std::numeric_limits<float>::infinity();
+    float max_val_right = -std::numeric_limits<float>::infinity();
+
+    int valid_start = REF_SIZE - 1; 
+    int valid_end = SEARCH_SIZE; 
+    float currentVal = 0;
+    // Recherche de l'index du pic maximal
+    for (int i = valid_start; i < valid_end; ++i) 
+    {
+        currentVal = out_time_left_result[i].r / fftSize; 
+        if (currentVal > max_val_left) 
+        {
+            max_val_left = currentVal;
+            best_offset_left = i - valid_start;
+        }
+        currentVal = out_time_right_result[i].r / fftSize; 
+        if (currentVal > max_val_left) 
+        {
+            max_val_right = currentVal;
+            best_offset_right = i - valid_start;
+        }
+    }
+
+    free(forward_cfg_left);
+    free(inverse_cfg_left);
+    free(forward_cfg_right);
+    free(inverse_cfg_right);
+
+    return {best_offset_left, max_val_left,best_offset_right, max_val_right};
+}
+
+inline void fft_cross_correlation(float center_y_left,float center_y_right,float scale)
+{
+
+    // Extraction de la région de recherche de notre flux
+        
+        for (int i = 0; i < SEARCH_SIZE; ++i) 
+        {
+            search_left[i]  = buffer[2 * i];
+            search_right[i] = buffer[2 * i + 1];
+        }
+
+        // 4. Calcul de l'alignement via Corrscope
+        trigger_t trigger = find_corrscope_trigger();
+
+        // 5. Remplissage des coordonnées graphiques alignées
+        float xStep = (float)WINDOW_WIDTH / REF_SIZE;
+
+        float sample;
+        int audio_index;
+
+        for (int i = 0; i < REF_SIZE; ++i) 
+        {
+            audio_index = trigger.best_offset_left + i;
+            
+            // Sécurité contre les débordements de tampons
+            sample = (audio_index < (int)search_left.size()) ? search_left[audio_index] : 0.0f;
+
+            fft_cc_render_points_left[i].x = i * xStep;fft_cc_render_points_left[i].x *= 0.995;
+            fft_cc_render_points_left[i].y = center_y_left - (sample * scale);fft_cc_render_points_left[i].y *= 0.995;
+            history_left[i] = sample;
+
+            audio_index = trigger.best_offset_right + i;
+            sample = (audio_index < (int)search_right.size()) ? search_right[audio_index] : 0.0f;
+            fft_cc_render_points_right[i].x = i * xStep;fft_cc_render_points_right[i].x *= 0.995;
+            fft_cc_render_points_right[i].y = center_y_right - (sample * scale);fft_cc_render_points_right[i].y *=0.995;
+            history_right[i] = sample;
+        }
+
+}
+
+
 
 int main(int argc, char* argv[]) {
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) 
+    {
         printf("Erreur d'initialisation SDL: %s\n", SDL_GetError());
         return -1;
     }
+
+    std::unordered_map < window_type, std::vector<float> *> windows_types = 
+    {
+        {window_type::hann,      generate_hann_window(REF_SIZE)},    
+        {window_type::hamming,   generate_hamming_window(REF_SIZE)},
+        {window_type::blackman, generate_blackman_window(REF_SIZE)}
+    };
+
+    current_window_type = windows_types[window_type::hann];
 
     SDL_Window* window = SDL_CreateWindow("Spectrogramme 2D - SDL3", WINDOW_WIDTH, WINDOW_HEIGHT, SDL_WINDOW_RESIZABLE);
     
@@ -726,13 +935,30 @@ int main(int argc, char* argv[]) {
         const char* oscilloscope_visualizer_style[] = { 
             "trigger", 
             "autocorrelation"
+            ,"fft cross-correlation"
+        };
+
+        const char* oscilloscope_window_type[] = { 
+            "hann", 
+            "hamming"
+            ,"blackman"
+        };
+
+         std::unordered_map<const char*,window_type> window_name_to_type = 
+         { 
+            {"hann", window_type::hann},
+            {"hamming", window_type::hamming},
+            {"blackman", window_type::blackman}
         };
 
     bool running = true;
 
 
     // Index de l'élément actuellement sélectionné (à déclarer en variable persistante/globale)
-    static int current_window_idx = 0; 
+    static int current_visualizer_style_idx = 0; 
+
+    static int current_window_type_idx = 0; 
+
     size_t id_selectionne = -1;
     size_t id_a_supprimer = -1;
     std::chrono::time_point<std::chrono::high_resolution_clock> start_playing_time;
@@ -742,6 +968,12 @@ int main(int argc, char* argv[]) {
     float gain_value = -20.;
 
     std::vector<float> drawSamples  = std::vector<float>(DISPLAY_SAMPLES,0.) ;
+
+        float hWidth = 800.0f / (DISPLAY_SAMPLES - 1);
+        float centerY = 300.0f;
+        float scale = 200.0f; // Hauteur de l'onde à l'écran
+        float center_y_left = 150.0f;
+        float center_y_right = 450.0f;
 
     while (running) {
         while (SDL_PollEvent(&event)) 
@@ -777,10 +1009,21 @@ int main(int argc, char* argv[]) {
             }
 
         }
+        // Dessin de l'interface
+        SDL_SetRenderDrawColor(renderer, 10, 15, 20, 255);
+        SDL_RenderClear(renderer);
+        // Dessin de la grille de l'oscilloscope
+        SDL_SetRenderDrawColor(renderer, 40, 50, 60, 255);
+        for (int i = 1; i < 8; ++i) {
+            SDL_RenderLine(renderer, (800 / 8) * i, 0, (800 / 8) * i, 600);
+            SDL_RenderLine(renderer, 0, (600 / 8) * i, 800, (600 / 8) * i);
+        }
+        
+
 
         if ( playback.load() == true)
         {
-            switch(current_window_idx)
+            switch(current_visualizer_style_idx)
             {
                 case 0:
                 {
@@ -789,44 +1032,41 @@ int main(int argc, char* argv[]) {
                 break;
                 case 1:
                 {
-                    GetAutocorrectedSamples();
+                    get_autocorrected_samples();
+                            
+                    SDL_SetRenderDrawColor(renderer, 0, 255, 128, 255);
+                    for (int i = 0; i < DISPLAY_SAMPLES - 1; ++i) {
+                        SDL_RenderLine(renderer, i * hWidth, center_y_left - ( (output_left[i]*=0.995) * scale), 
+                                                (i + 1) * hWidth, center_y_left - ( (output_left[i + 1] *=0.995)* scale));
+                    }
+                    SDL_SetRenderDrawColor(renderer, 255, 128, 0, 255); // Orange pour la Droite
+
+                    for (int i = 0; i < DISPLAY_SAMPLES - 1; ++i) 
+                    {
+                        SDL_RenderLine(renderer, i * hWidth, center_y_right - ( (output_right[i]*=0.995) * scale), 
+                                                (i + 1) * hWidth, center_y_right - ( (output_right[i + 1]*=0.995) * scale));
+                    }
+                }
+                case 2:
+                {
+                    fft_cross_correlation(center_y_left, center_y_right, scale);
+                    // Dessin des axes horizontaux de référence (Gris discret)
+                    SDL_SetRenderDrawColor(renderer, 35, 40, 45, 255);
+                    SDL_RenderLine(renderer, 0.0f, center_y_left, (float)WINDOW_WIDTH, center_y_left);
+                    SDL_RenderLine(renderer, 0.0f, center_y_right, (float)WINDOW_WIDTH, center_y_right);
+
+                    // Dessin du Canal Gauche (Vert Émeraude)
+                    SDL_SetRenderDrawColor(renderer, 0, 255, 150, 255);
+                    SDL_RenderLines(renderer, fft_cc_render_points_left.data(), REF_SIZE);
+
+                    // Dessin du Canal Droite (Magenta / Rose)
+                    SDL_SetRenderDrawColor(renderer, 255, 0, 150, 255);
+                    SDL_RenderLines(renderer, fft_cc_render_points_right.data(), REF_SIZE);
+
                 }
                 break;
             }
         }
-
-        // Dessin de l'interface
-        SDL_SetRenderDrawColor(renderer, 10, 15, 20, 255);
-        SDL_RenderClear(renderer);
-
-        // Dessin de la grille de l'oscilloscope
-        SDL_SetRenderDrawColor(renderer, 40, 50, 60, 255);
-        for (int i = 1; i < 8; ++i) {
-            SDL_RenderLine(renderer, (800 / 8) * i, 0, (800 / 8) * i, 600);
-            SDL_RenderLine(renderer, 0, (600 / 8) * i, 800, (600 / 8) * i);
-        }
-
-        // Dessin de la forme d'onde (Lignes continues)
-        SDL_SetRenderDrawColor(renderer, 0, 255, 128, 255);
-        float hWidth = 800.0f / (DISPLAY_SAMPLES - 1);
-        float centerY = 300.0f;
-        float scale = 200.0f; // Hauteur de l'onde à l'écran
-
-        float centerY_Left = 150.0f;
-for (int i = 0; i < DISPLAY_SAMPLES - 1; ++i) {
-    SDL_RenderLine(renderer, i * hWidth, centerY_Left - ( (output_left[i]*=0.995) * scale), 
-                             (i + 1) * hWidth, centerY_Left - ( (output_left[i + 1] *=0.995)* scale));
-}
-
-// --- CANAL DROIT (Moitié Inférieure : Centre Y = 450) ---
-SDL_SetRenderDrawColor(renderer, 255, 128, 0, 255); // Orange pour la Droite
-float centerY_Right = 450.0f;
-for (int i = 0; i < DISPLAY_SAMPLES - 1; ++i) 
-{
-    SDL_RenderLine(renderer, i * hWidth, centerY_Right - ( (output_right[i]*=0.995) * scale), 
-                             (i + 1) * hWidth, centerY_Right - ( (output_right[i + 1]*=0.995) * scale));
-}
-
 
         SDL_RenderPresent(renderer);
 
@@ -851,8 +1091,14 @@ for (int i = 0; i < DISPLAY_SAMPLES - 1; ++i)
         ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "oscilloscope visualizer");
         ImGui::Separator();
 
-        ImGui::Combo("oscilloscope visualizer", &current_window_idx, oscilloscope_visualizer_style, IM_ARRAYSIZE(oscilloscope_visualizer_style));
+        ImGui::Combo("oscilloscope visualizer", &current_visualizer_style_idx, oscilloscope_visualizer_style, IM_ARRAYSIZE(oscilloscope_visualizer_style));
         ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::Combo("oscilloscope window", &current_window_type_idx, oscilloscope_window_type, IM_ARRAYSIZE(oscilloscope_window_type));
+
+
+        current_window_type = windows_types[ window_name_to_type [oscilloscope_window_type[current_window_type_idx]] ];
+        
         ImGui::Spacing();
         ImGui::Separator();
         if( ImGui::SliderFloat("Gain (dB)", &gain_value, -90, 0.) )
@@ -866,7 +1112,7 @@ for (int i = 0; i < DISPLAY_SAMPLES - 1; ++i)
         ImGui::Separator();
         
         // if capture to playback not selected
-        if (current_window_idx != 2 && playback.load() == false )
+        if (playback.load() == false )
         {
             ImGui::Text("choose audio file :");
             ImGui::TextUnformatted(selected_file_path.c_str());
@@ -963,10 +1209,10 @@ for (int i = 0; i < DISPLAY_SAMPLES - 1; ++i)
 
             fileDialog.Display();
         }
-        if ( file_loaded.load() == true || current_window_idx == 2)
+        if ( file_loaded.load() == true)
         {
             ImGui::Separator();
-            if ( file_loaded && current_window_idx != 2 )
+            if ( file_loaded)
             {
                 if ( playback.load() == false)
                 {
@@ -1034,7 +1280,7 @@ for (int i = 0; i < DISPLAY_SAMPLES - 1; ++i)
                 samples_cursor = 0;
                 next_cursor = 0;
                 SDL_ResumeAudioStreamDevice(playback_stream);
-                if ( current_window_idx == 2)
+                if ( current_visualizer_style_idx == 2)
                 {
                     SDL_ResumeAudioStreamDevice(capture_stream);
                 }
@@ -1056,7 +1302,7 @@ for (int i = 0; i < DISPLAY_SAMPLES - 1; ++i)
                     next_cursor = 0;
                     SDL_PauseAudioStreamDevice(playback_stream);
                     SDL_ClearAudioStream(playback_stream); 
-                    if ( current_window_idx == 2)
+                    if ( current_visualizer_style_idx == 2)
                     {
                         SDL_PauseAudioStreamDevice(capture_stream);
                         SDL_ClearAudioStream(capture_stream); 
@@ -1073,7 +1319,7 @@ for (int i = 0; i < DISPLAY_SAMPLES - 1; ++i)
                 next_cursor = 0;
                 SDL_PauseAudioStreamDevice(playback_stream);
                 SDL_ClearAudioStream(playback_stream); 
-                if ( current_window_idx == 2)
+                if ( current_visualizer_style_idx == 2)
                 {
                     SDL_PauseAudioStreamDevice(capture_stream);
                     SDL_ClearAudioStream(capture_stream); 
