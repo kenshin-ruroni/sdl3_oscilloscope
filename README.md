@@ -4,4 +4,4 @@ A very simple sdl3/imgui oscilloscope
 
 ## 📸 Aperçu
 
-![](sc1.png)
+![a screenshot](sc1.png)
