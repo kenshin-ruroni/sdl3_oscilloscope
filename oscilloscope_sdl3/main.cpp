@@ -125,15 +125,133 @@ struct compressor_filter_t
      }
 };
 
+struct  flanger_filter_t 
+{
+
+    // Ligne de retard (Buffer circulaire)
+    std::vector<float> delay_buffer_L, delay_buffer_R;
+    size_t writeIndex_L = 0; size_t writeIndex_R = 0;
+    size_t buffer_size = 0;
+
+    // Paramètres de l'effet
+    float sample_rate = 44100.0f;
+    float lfo_rate_Hz = 0.25f;       // Vitesse du LFO (vitesse du balayage)
+    float depth = 0.7f;         // Intensité de la modulation (0.0 à 1.0)
+    float feedback = 0.3f;      // Réinjection du signal (crée un effet plus prononcé)
+    float dryWet = 0.5f;        // Balance entre signal d'origine (0.0) et effet (1.0)
+
+    // Phase de l'oscillateur (LFO)
+    float lfoPhase = 0.0f;
+
+    // Constantes de temps pour le Flanger (en secondes)
+    const float maxDelaySec = 0.005f; // 5 ms max pour un flanger typique
+    const float baseDelaySec = 0.002f; // 2 ms de retard de base
+
+
+    inline void  set_sample_rate(float sr) 
+    {
+        sample_rate = sr;
+        buffer_size = static_cast<int>(maxDelaySec * sample_rate) + 5;
+        delay_buffer_L.resize(buffer_size, 0.0f);
+        delay_buffer_R.resize(buffer_size, 0.0f);
+        reset();
+    }
+
+    // Configuration des paramètres à la volée
+    void set_parameters(float lfo_rate, float depthVal, float feedbackVal, float dryWetVal) {
+        lfo_rate_Hz = lfo_rate;
+        depth = std::clamp(depthVal, 0.0f, 1.0f);
+        feedback = std::clamp(feedbackVal, -0.95f, 0.95f); // eviter l'auto-oscillation infinie
+        dryWet = std::clamp(dryWetVal, 0.0f, 1.0f);
+        reset();
+    }
+
+    // Traitement d'un échantillon unique (Mono)
+    inline void process(float *sample_L, float *sample_R) 
+    {
+        // 1. Mettre à jour le LFO (Génère une onde sinusoïdale entre -1.0 et 1.0)
+        float lfoOut = std::sin(lfoPhase);
+        
+        // Avancer la phase du LFO pour le prochain échantillon
+        lfoPhase = std::clamp( lfoPhase + 2.0f * M_PI * lfo_rate_Hz / sample_rate, -2.0f * M_PI, 2.0f * M_PI);
+        // 2. Calculer le temps de retard actuel (en secondes) modulé par le LFO
+        // Le retard va osciller autour de baseDelaySec
+        float currentDelaySec = baseDelaySec + (lfoOut * depth * 0.002f); 
+        
+        // Convertir le retard en nombre d'échantillons (valeur flottante)
+        float delaySamples = currentDelaySec * sample_rate;
+
+        // 3. Calculer la position de lecture dans le buffer circulaire
+        float readPosition = static_cast<float>(writeIndex_L) - delaySamples;
+        if (readPosition < 0.0f) 
+        {
+            readPosition += static_cast<float>(buffer_size);
+        }
+
+        size_t indexA = static_cast<size_t>(readPosition);
+        size_t indexB = (indexA + 1) % buffer_size;
+        float fraction = readPosition - static_cast<float>(indexA);
+        
+        float delayedSample = delay_buffer_L[indexA] + fraction * (delay_buffer_L[indexB] - delay_buffer_L[indexA]);
+
+        // 5. Calculer le signal à écrire (Entrée + Feedback du signal retardé)
+        float sampleToStore = *sample_L + (delayedSample * feedback);
+        delay_buffer_L[writeIndex_L] = sampleToStore;
+
+        // Avancer l'index d'écriture du buffer circulaire
+        writeIndex_L = (++writeIndex_L) % buffer_size;
+        *sample_L = ((1.0f - dryWet) * *sample_L) + (dryWet * delayedSample);
+
+        readPosition = static_cast<float>(writeIndex_R) - delaySamples;
+        if (readPosition < 0.0f) 
+        {
+            readPosition += static_cast<float>(buffer_size);
+        }
+
+        indexA = static_cast<size_t>(readPosition);
+        indexB = (indexA + 1) % buffer_size;
+        fraction = readPosition - static_cast<float>(indexA);
+        
+        delayedSample = delay_buffer_R[indexA] + fraction * (delay_buffer_R[indexB] - delay_buffer_R[indexA]);
+        sampleToStore = *sample_R + (delayedSample * feedback);
+        delay_buffer_R[writeIndex_R] = sampleToStore;
+
+        sampleToStore = *sample_R + (delayedSample * feedback);
+
+        // Avancer l'index d'écriture du buffer circulaire
+        writeIndex_R = (++writeIndex_R) % buffer_size;      
+        // 6. Mixer le signal Dry (origine) et Wet (effet)
+        *sample_R = ((1.0f - dryWet) * *sample_R) + (dryWet * delayedSample);
+
+    }
+
+    void reset() {
+        std::fill(delay_buffer_L.begin(), delay_buffer_L.end(), 0.0f);
+        std::fill(delay_buffer_R.begin(), delay_buffer_R.end(), 0.0f);
+        writeIndex_L = writeIndex_R = 0;
+        lfoPhase = 0.0f;
+    }
+};
+
+
+
+
 typedef void (*apply_filter_function)(float *sample_L,float *sample_R);
 
 static std::vector<filter_combo_item_t> filters_items = {
     { "reverb", false },
     { "compressor", false },
+    { "flanger", false },
 };
 
 reverb_filter_t reverb_filter;
 compressor_filter_t compressor_filter;
+flanger_filter_t flanger_filter;
+
+static inline void apply_flanger(float *sample_L,float *sample_R)
+{
+        flanger_filter.process(sample_L,sample_R);
+}
 
 static inline void apply_reverb(float *sample_L,float *sample_R)
 {
@@ -152,7 +270,8 @@ static inline void apply_compressor(float *sample_L,float *sample_R)
 std::unordered_map<const char *, apply_filter_function > filters_map =
 {
     {"reverb", &apply_reverb},
-    {"compressor", &apply_compressor}
+    {"compressor", &apply_compressor},
+    {"flanger", &apply_flanger}
 };
 
 std::unordered_set<const char *> active_filters;
@@ -1089,6 +1208,7 @@ inline void update_data_from_loaded_file(size_t song_hash)
     // reset sample rate for filter
     reverb_filter.set_sample_rate(sample_rate.load() );
     compressor_filter.set_sample_rate(sample_rate.load() );
+    flanger_filter.set_sample_rate(sample_rate.load() );
     // copy audio data to samples vector
     samples.resize(songs[song_hash].samples.size());
     memcpy(samples.data(),songs[song_hash].samples.data(), songs[song_hash].samples.size() * sizeof(float) );
