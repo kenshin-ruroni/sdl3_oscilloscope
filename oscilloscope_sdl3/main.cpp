@@ -190,9 +190,9 @@ struct  flanger_filter_t
             readPosition += static_cast<float>(buffer_size);
         }
 
-        size_t indexA = static_cast<size_t>(readPosition);
+        size_t indexA = std::min( delay_buffer_L.size() - 1, static_cast<size_t>(readPosition) );
         size_t indexB = (indexA + 1) % buffer_size;
-        float fraction = readPosition - static_cast<float>(indexA);
+        float fraction = readPosition - static_cast<float>(indexA) + 0.02;
         
         float delayedSample = delay_buffer_L[indexA] + fraction * (delay_buffer_L[indexB] - delay_buffer_L[indexA]);
 
@@ -210,7 +210,7 @@ struct  flanger_filter_t
             readPosition += static_cast<float>(buffer_size);
         }
 
-        indexA = static_cast<size_t>(readPosition);
+        indexA = std::min( delay_buffer_R.size() - 1, static_cast<size_t>(readPosition) );
         indexB = (indexA + 1) % buffer_size;
         fraction = readPosition - static_cast<float>(indexA);
         
@@ -834,59 +834,44 @@ bool KnobDial(const char* label, float* p_value, float v_min, float v_max, float
     return value_changed;
 }
 
-void loading_spinner(const char* label, const char* text, float radius, float thickness, const ImU32& color) {
+void loading_spinner(const char* label, float radius, float thickness, const ImU32& color) {
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (window->SkipItems)
+        return ;
+
     ImGuiContext& g = *GImGui;
-    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    const ImGuiStyle& style = g.Style;
+    const ImGuiID id = window->GetID(label);
 
-    // 1. Forcer la correction de la couleur (Opacité 100%)
-    ImU32 opaque_color = color | 0xFF000000;
-
-    // 2. Récupérer l'emplacement et réserver une zone TRÈS LARGE 
-    // On ajoute de la marge (padding) pour que les calculs trigonométriques ne se fassent pas sur la bordure de clip
-    float margin = radius * 2.0f; 
-    ImVec2 pos = ImGui::GetCursorScreenPos();
-    ImVec2 text_size = ImGui::CalcTextSize(text);
+    // Calculate interactive boundaries inside the layout flow
+    ImVec2 pos = window->DC.CursorPos;
+    ImVec2 size((radius) * 2, (radius + style.FramePadding.y) * 2);
+    const ImRect bb(pos, ImVec2(pos.x + size.x, pos.y + size.y));
     
-    float box_width = std::max(radius * 2.0f, text_size.x) + margin;
-    float box_height = (radius * 2.0f) + text_size.y + 20.0f;
+    ImGui::ItemSize(bb, style.FramePadding.y);
+    if (!ImGui::ItemAdd(bb, id))
+        return ;
 
-    // Dummy avance le curseur proprement sans aucun comportement de bouton restrictif
-    ImGui::Dummy(ImVec2(box_width, box_height));
+    // Vector drawing using the active ImDrawList
+    window->DrawList->PathClear();
+    
+    int num_segments = 30;
+    // Calculate trailing expansion via sine wave based on time elapsed
+    int start = (int)std::abs(std::sin(g.Time * 1.8f) * (num_segments - 5));
+    
+    const float a_min = IM_PI * 2.0f * ((float)start) / (float)num_segments;
+    const float a_max = IM_PI * 2.0f * ((float)num_segments - 3) / (float)num_segments;
+    const ImVec2 centre = ImVec2(pos.x + radius, pos.y + radius + style.FramePadding.y);
 
-    // 3. Calculer les centres exacts à l'intérieur de notre boîte sécurisée
-    ImVec2 center(pos.x + (box_width * 0.5f), pos.y + radius + 10.0f);
-    ImVec2 text_pos(pos.x + (box_width - text_size.x) * 0.5f, pos.y + (radius * 2.0f) + 15.0f);
-
-    // 4. DÉSACTIVER LE CLIPPNG TEMPORAIREMENT
-    // On pousse un rectangle de clip immense (taille de l'écran global) pour empêcher le moteur de cacher le dessin
-    ImVec2 display_pos = ImGui::GetMainViewport()->Pos;
-    ImVec2 display_size = ImGui::GetMainViewport()->Size;
-    draw_list->PushClipRect(display_pos, ImVec2(display_pos.x + display_size.x, display_pos.y + display_size.y), false);
-
-    // 5. RENDU DE L'ANNEAU
-    float time = (float)ImGui::GetTime() * 4.0f;
-    int num_segments = 32;
-    float start_angle = time;
-    float end_angle = start_angle + (3.14159f * 1.5f);
-
-    draw_list->PathClear(); //
-    for (int i = 0; i <= num_segments; i++) {
-        float alpha = (float)i / (float)num_segments;
-        float angle = start_angle + alpha * (end_angle - start_angle);
-        draw_list->PathLineTo(ImVec2( //
-            center.x + std::cos(angle) * radius,
-            center.y + std::sin(angle) * radius
-        ));
+    for (int i = 0; i < num_segments; i++) {
+        const float a = a_min + ((float)i / (float)num_segments) * (a_max - a_min);
+        window->DrawList->PathLineTo(ImVec2(centre.x + std::cos(a + g.Time * 8.0f) * radius,
+                                            centre.y + std::sin(a + g.Time * 8.0f) * radius));
     }
-    draw_list->PathStroke(opaque_color, ImDrawFlags_None, thickness); //
 
-    // 6. RENDU DU TEXTE
-    draw_list->AddText(text_pos, ImGui::GetColorU32(ImGuiCol_Text), text);
+    window->DrawList->PathStroke(color, 0, thickness);
 
-    // RESTAURER LE CLIPPING NORMAL D'IMGUI
-    draw_list->PopClipRect();
 }
-
 
 
 bool ImGuiPlayButton(const char* label_id, ImVec2 size) {
@@ -1649,6 +1634,10 @@ int main(int argc, char* argv[])
             {
                 std::string m =std::string("loading file ...")+selected_file_path;
                 ImGui::Text(m.c_str());
+
+                ImU32 c = IM_COL32(127, 255, 0, 255); 
+                loading_spinner("##SpinnerLoading",20.f,5.f, c );
+        
             }
 
             if (error_file_loading.load() == true )
@@ -1847,12 +1836,6 @@ int main(int argc, char* argv[])
             }
         }
 
-        if (file_loading.load() == true)
-        {
-            ImGui::SameLine();
-            ImU32 c = IM_COL32(127, 255, 0, 255); 
-            loading_spinner("##SpinnerLoading","loading file. please wait...",20.f,5.f, c );
-        }
         ImGui::End();
 
         // 3. Rendu de la scène
