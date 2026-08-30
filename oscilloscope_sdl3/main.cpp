@@ -28,8 +28,9 @@
 
 #include "imfilebrowser.h"
 
+
 extern "C" {
-    #include "reverb.h" // Adaptez au nom réel de votre fichier d'en-tête
+    #include "filters.h"
 }
 
 #include <SDL3/SDL.h>
@@ -99,13 +100,40 @@ struct reverb_filter_t
      }
 };
 
+struct compressor_filter_t
+{
+     sf_compressor_state_st compressor_state;
+
+     inline void set_sample_rate(int sample_rate)
+     {
+        sf_defaultcomp(&compressor_state, sample_rate);
+        
+     }
+     sf_sample_st sample_in[32];
+     sf_sample_st sample_out[32];
+     
+
+     inline void process(float *sample_L, float *sample_R)
+     {
+        
+        sample_in[0] = sf_sample_st{ *sample_L,*sample_R};
+        sf_compressor_process(&compressor_state, 1, sample_in, sample_out);
+        
+        *sample_L = sample_out[0].L;
+        *sample_R = sample_out[0].R;
+
+     }
+};
+
 typedef void (*apply_filter_function)(float *sample_L,float *sample_R);
 
 static std::vector<filter_combo_item_t> filters_items = {
-    { "reverb", false }
+    { "reverb", false },
+    { "compressor", false },
 };
 
 reverb_filter_t reverb_filter;
+compressor_filter_t compressor_filter;
 
 static inline void apply_reverb(float *sample_L,float *sample_R)
 {
@@ -114,9 +142,17 @@ static inline void apply_reverb(float *sample_L,float *sample_R)
 
 }
 
+static inline void apply_compressor(float *sample_L,float *sample_R)
+{
+
+   compressor_filter.process(sample_L,sample_R);
+
+}
+
 std::unordered_map<const char *, apply_filter_function > filters_map =
 {
-    {"reverb", &apply_reverb}
+    {"reverb", &apply_reverb},
+    {"compressor", &apply_compressor}
 };
 
 std::unordered_set<const char *> active_filters;
@@ -1052,6 +1088,7 @@ inline void update_data_from_loaded_file(size_t song_hash)
 {
     // reset sample rate for filter
     reverb_filter.set_sample_rate(sample_rate.load() );
+    compressor_filter.set_sample_rate(sample_rate.load() );
     // copy audio data to samples vector
     samples.resize(songs[song_hash].samples.size());
     memcpy(samples.data(),songs[song_hash].samples.data(), songs[song_hash].samples.size() * sizeof(float) );

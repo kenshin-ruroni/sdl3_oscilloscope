@@ -42,9 +42,9 @@ void sf_simplecomp(sf_compressor_state_st *state, int rate, float pregain, float
 		0.090f, // releasezone1
 		0.160f, // releasezone2
 		0.420f, // releasezone3
-		0.980f, // releasezone4
-		0.000f, // postgain
-		1.000f  // wet
+		0.880f, // releasezone4
+		1.100f, // postgain
+		0.750f  // wet
 	);
 }
 

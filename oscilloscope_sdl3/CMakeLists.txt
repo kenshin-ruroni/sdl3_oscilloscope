@@ -78,6 +78,8 @@ set(PROJECT_SOURCES
         dr_libs/dr_wav.h
         reverb.c
         reverb.h
+        compressor.c
+        compressor.h
         mem.c
         mem.h
 )
