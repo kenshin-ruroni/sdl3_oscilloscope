@@ -141,7 +141,7 @@ struct  flanger_filter_t
     float dryWet = 0.5f;        // Balance entre signal d'origine (0.0) et effet (1.0)
 
     // Phase de l'oscillateur (LFO)
-    float lfoPhase = 0.0f;
+    float lfo_phase = 0.0f;
 
     // Constantes de temps pour le Flanger (en secondes)
     const float maxDelaySec = 0.005f; // 5 ms max pour un flanger typique
@@ -165,18 +165,20 @@ struct  flanger_filter_t
         dryWet = std::clamp(dryWetVal, 0.0f, 1.0f);
         reset();
     }
+    static constexpr float two_pi = 2.0f * M_PI;
 
     // Traitement d'un échantillon unique (Mono)
     inline void process(float *sample_L, float *sample_R) 
     {
         // 1. Mettre à jour le LFO (Génère une onde sinusoïdale entre -1.0 et 1.0)
-        float lfoOut = std::sin(lfoPhase);
+        float lfo_out = std::sin(lfo_phase);
         
         // Avancer la phase du LFO pour le prochain échantillon
-        lfoPhase = std::clamp( lfoPhase + 2.0f * M_PI * lfo_rate_Hz / sample_rate, -2.0f * M_PI, 2.0f * M_PI);
+        lfo_phase = fmod( lfo_phase + two_pi * lfo_rate_Hz / sample_rate, two_pi);
+
         // 2. Calculer le temps de retard actuel (en secondes) modulé par le LFO
         // Le retard va osciller autour de baseDelaySec
-        float currentDelaySec = baseDelaySec + (lfoOut * depth * 0.002f); 
+        float currentDelaySec = baseDelaySec + (lfo_out * depth * 0.002f); 
         
         // Convertir le retard en nombre d'échantillons (valeur flottante)
         float delaySamples = currentDelaySec * sample_rate;
@@ -229,7 +231,7 @@ struct  flanger_filter_t
         std::fill(delay_buffer_L.begin(), delay_buffer_L.end(), 0.0f);
         std::fill(delay_buffer_R.begin(), delay_buffer_R.end(), 0.0f);
         writeIndex_L = writeIndex_R = 0;
-        lfoPhase = 0.0f;
+        lfo_phase = 0.0f;
     }
 };
 
@@ -832,6 +834,61 @@ bool KnobDial(const char* label, float* p_value, float v_min, float v_max, float
     return value_changed;
 }
 
+void loading_spinner(const char* label, const char* text, float radius, float thickness, const ImU32& color) {
+    ImGuiContext& g = *GImGui;
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+    // 1. Forcer la correction de la couleur (Opacité 100%)
+    ImU32 opaque_color = color | 0xFF000000;
+
+    // 2. Récupérer l'emplacement et réserver une zone TRÈS LARGE 
+    // On ajoute de la marge (padding) pour que les calculs trigonométriques ne se fassent pas sur la bordure de clip
+    float margin = radius * 2.0f; 
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    ImVec2 text_size = ImGui::CalcTextSize(text);
+    
+    float box_width = std::max(radius * 2.0f, text_size.x) + margin;
+    float box_height = (radius * 2.0f) + text_size.y + 20.0f;
+
+    // Dummy avance le curseur proprement sans aucun comportement de bouton restrictif
+    ImGui::Dummy(ImVec2(box_width, box_height));
+
+    // 3. Calculer les centres exacts à l'intérieur de notre boîte sécurisée
+    ImVec2 center(pos.x + (box_width * 0.5f), pos.y + radius + 10.0f);
+    ImVec2 text_pos(pos.x + (box_width - text_size.x) * 0.5f, pos.y + (radius * 2.0f) + 15.0f);
+
+    // 4. DÉSACTIVER LE CLIPPNG TEMPORAIREMENT
+    // On pousse un rectangle de clip immense (taille de l'écran global) pour empêcher le moteur de cacher le dessin
+    ImVec2 display_pos = ImGui::GetMainViewport()->Pos;
+    ImVec2 display_size = ImGui::GetMainViewport()->Size;
+    draw_list->PushClipRect(display_pos, ImVec2(display_pos.x + display_size.x, display_pos.y + display_size.y), false);
+
+    // 5. RENDU DE L'ANNEAU
+    float time = (float)ImGui::GetTime() * 4.0f;
+    int num_segments = 32;
+    float start_angle = time;
+    float end_angle = start_angle + (3.14159f * 1.5f);
+
+    draw_list->PathClear(); //
+    for (int i = 0; i <= num_segments; i++) {
+        float alpha = (float)i / (float)num_segments;
+        float angle = start_angle + alpha * (end_angle - start_angle);
+        draw_list->PathLineTo(ImVec2( //
+            center.x + std::cos(angle) * radius,
+            center.y + std::sin(angle) * radius
+        ));
+    }
+    draw_list->PathStroke(opaque_color, ImDrawFlags_None, thickness); //
+
+    // 6. RENDU DU TEXTE
+    draw_list->AddText(text_pos, ImGui::GetColorU32(ImGuiCol_Text), text);
+
+    // RESTAURER LE CLIPPING NORMAL D'IMGUI
+    draw_list->PopClipRect();
+}
+
+
+
 bool ImGuiPlayButton(const char* label_id, ImVec2 size) {
 
     bool pressed = ImGui::Button(label_id, size);
@@ -1377,7 +1434,6 @@ int main(int argc, char* argv[])
             }
         }
 
-
         if (playback.load() == true && SDL_GetAudioStreamQueued(playback_stream) < minimum_audio)
         {
             // this will feed 1024 samples each frame until we get to our maximum. 
@@ -1481,8 +1537,8 @@ int main(int argc, char* argv[])
         ImGuiWindowFlags ui_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse;
         
         ImGui::Begin("menu", nullptr, ui_flags);
-        ImGui::Separator();
 
+        ImGui::Separator();
 
         // Section Configuration
         ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "oscilloscope visualizer");
@@ -1791,6 +1847,12 @@ int main(int argc, char* argv[])
             }
         }
 
+        if (file_loading.load() == true)
+        {
+            ImGui::SameLine();
+            ImU32 c = IM_COL32(127, 255, 0, 255); 
+            loading_spinner("##SpinnerLoading","loading file. please wait...",20.f,5.f, c );
+        }
         ImGui::End();
 
         // 3. Rendu de la scène
