@@ -62,7 +62,6 @@ alignas(64) std::atomic<float> gain = std::pow(10.f,gain_db/20.f);
 alignas(64) std::atomic<uint> channels = 2; 
 alignas(64) std::atomic<uint> sample_rate = 44100;
 alignas(64) std::atomic<bool> file_loaded = false;
-alignas(64) std::atomic<bool> update_playback_stream = true;
 alignas(64) std::atomic<bool> file_loading = false;
 alignas(64) std::atomic<bool> error_file_loading = false;
 alignas(64) std::atomic<bool> close_dialog = false;
@@ -74,6 +73,53 @@ std::string error_file_loading_msg;
 
 
 std::vector<float> buffer(BUFFER_SIZE);  
+
+struct filter_combo_item_t
+{
+    const char* label;
+    bool is_selected;
+};
+
+struct reverb_filter_t
+{
+     sf_reverb_state_st rv;
+
+     inline void set_sample_rate(int sample_rate)
+     {
+        sf_presetreverb(&rv, sample_rate, SF_REVERB_PRESET_DEFAULT);
+     }
+     sf_sample_st sample_in;
+     sf_sample_st sample_out;
+     inline void process(float *sample_L, float *sample_R)
+     {
+        sample_in = sf_sample_st{ *sample_L,*sample_R};
+        sf_reverb_process(&rv, 1, &sample_in, &sample_out);
+        *sample_L = sample_out.L;
+        *sample_R = sample_out.R;
+     }
+};
+
+typedef void (*apply_filter_function)(float *sample_L,float *sample_R);
+
+static std::vector<filter_combo_item_t> filters_items = {
+    { "reverb", false }
+};
+
+reverb_filter_t reverb_filter;
+
+static inline void apply_reverb(float *sample_L,float *sample_R)
+{
+
+   reverb_filter.process(sample_L,sample_R);
+
+}
+
+std::unordered_map<const char *, apply_filter_function > filters_map =
+{
+    {"reverb", &apply_reverb}
+};
+
+std::unordered_set<const char *> active_filters;
 
 struct ScopeData {
     std::vector<float> circularBuffer{std::vector<float>(BUFFER_SIZE, 0.0f)};
@@ -409,7 +455,7 @@ constexpr float threshold = 1.;
 
         std::string path = file_path;
 
-        std::thread ([](std::string file,std::vector<float> *samples){
+        std::thread ([](std::string file){
 
             auto start = std::chrono::high_resolution_clock::now();
             
@@ -434,7 +480,7 @@ constexpr float threshold = 1.;
             std::string file_name = path.stem().string();
 
             int status = extension == ".wav" ? 1 : extension == ".flac" ? 2 : extension == ".mp3" ? 3 : 0;
-
+            std::vector<float> samples;
             bool success = false;
             switch(status)
             {
@@ -444,13 +490,13 @@ constexpr float threshold = 1.;
             }
             break;
             case 1:
-                success = load_wav_file(file, samples,&c, &s);
+                success = load_wav_file(file, &samples,&c, &s);
                 break;
             case 2:
-                success = load_flac_file(file, samples,&c, &s);
+                success = load_flac_file(file, &samples,&c, &s);
                 break;
             case 3:
-                success = load_mp3_file(file, samples,&c, &s);
+                success = load_mp3_file(file, &samples,&c, &s);
             }
 
             if ( success )
@@ -458,16 +504,15 @@ constexpr float threshold = 1.;
                 audio_file_data_t data = 
                 {
                     .path = file,
-                    .duration = ( static_cast<float>(samples->size())/static_cast<float>(c)/static_cast<float>(s) ),
+                    .duration = ( static_cast<float>(samples.size())/static_cast<float>(c)/static_cast<float>(s) ),
                     .title = path.filename().string(),
                     .channels = c,
                     .sample_rate = s
                 };
-                data.samples.resize(samples->size());
-                memcpy(data.samples.data(), samples->data(), samples->size() * sizeof(float));
+                data.samples.resize(samples.size());
+                memcpy(data.samples.data(), samples.data(), samples.size() * sizeof(float));
 
                 songs.emplace(hash, std::move(data) );
-
                 channels.store(c);
                 sample_rate.store(s);
                 file_loaded.store(true );
@@ -475,7 +520,7 @@ constexpr float threshold = 1.;
             file_loading.store(false);
             error_file_loading.store(!success);
 
-        }, path, samples).detach();
+        }, path).detach();
     };
 
 bool ImGuiStopButton(const char* str_id, ImVec2 size) 
@@ -952,17 +997,18 @@ inline int apply_zero_crossing_post_trigger(const std::vector<float> *searchRegi
     return best_offset;
 }
 
+float sample_L, sample_R, sample;
 inline void fft_cross_correlation(float center_y_left,float center_y_right,float scale)
 {
 
     // Extraction de la région de recherche de notre flux
-        float sample;
+        
         for (int i = 0; i < SEARCH_SIZE; ++i) 
         {
-            sample = search_left[i] ;
-            search_left[i]  = playback.load() == true ? buffer[2 * i] : sample * 0.995 ;
-            sample = search_right[i] ;
-            search_right[i] = playback.load() == true ?buffer[2 * i + 1] : sample * 0.995 ;
+            sample_L = search_left[i] ;
+            sample_R = search_right[i] ;
+            search_left[i]  = playback.load() == true ? buffer[2 * i] : sample_L * 0.995 ;
+            search_right[i] = playback.load() == true ?buffer[2 * i + 1] : sample_R * 0.995 ;
         }
         
 
@@ -1001,54 +1047,19 @@ inline void fft_cross_correlation(float center_y_left,float center_y_right,float
 
 }
 
-
-typedef void (*apply_filter)(void *filter_pointer,float *sample_L,float *sample_R);
-
-struct filter_combo_item_t
-{
-    const char* label;
-    bool is_selected;
-};
-
-struct reverb_filter_t
-{
-     sf_reverb_state_st rv;
-
-     inline void set_sample_rate(int sample_rate)
-     {
-        sf_presetreverb(&rv, sample_rate, SF_REVERB_PRESET_DEFAULT);
-     }
-     sf_sample_st sample_in;
-     sf_sample_st sample_out;
-     inline void process(float *sample_L, float *sample_R)
-     {
-        sample_in = sf_sample_st{ *sample_L,*sample_R};
-        sf_reverb_process(&rv, 2, &sample_in, &sample_out);
-        *sample_L = sample_out.L;
-        *sample_R = sample_out.R;
-     }
-};
-
-reverb_filter_t reverb_filter;
-
-static inline void apply_reverb(void *filter_pointer,float *sample_L,float *sample_R)
-{
-   reverb_filter_t *reverb_filter = (reverb_filter_t *)filter_pointer;
-   reverb_filter->process(sample_L,sample_R);
-
-}
-
-inline void update_data_from_loaded_file(int id_selectionne)
+double total_playing_time = 0;
+inline void update_data_from_loaded_file(size_t song_hash)
 {
     // reset sample rate for filter
     reverb_filter.set_sample_rate(sample_rate.load() );
     // copy audio data to samples vector
-    samples.resize(songs[id_selectionne].samples.size());
-    memcpy(samples.data(),songs[id_selectionne].samples.data(), songs[id_selectionne].samples.size() * sizeof(float) );
-
+    samples.resize(songs[song_hash].samples.size());
+    memcpy(samples.data(),songs[song_hash].samples.data(), songs[song_hash].samples.size() * sizeof(float) );
+    total_playing_time = samples.size()/channels / sample_rate;
 }
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) 
+{
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) 
     {
         printf("Erreur d'initialisation SDL: %s\n", SDL_GetError());
@@ -1172,11 +1183,11 @@ int main(int argc, char* argv[]) {
 
     static int current_window_type_idx = 0; 
 
-    size_t id_selectionne = -1;
+    size_t song_hash_selected = -1;
     size_t id_a_supprimer = -1;
-    std::chrono::time_point<std::chrono::high_resolution_clock> start_playing_time;
 
-    double total_playing_time;
+
+
 
     float gain_value = -20.;
 
@@ -1191,21 +1202,7 @@ int main(int argc, char* argv[]) {
         std::string filters_preview_text = "";
         int filters_selected_count = 0;
 
-        struct filter_combo_item_t
-        {
-            const char* label;
-            bool is_selected;
-        };
 
-        static std::vector<filter_combo_item_t> filters_items = {
-            { "reverb", false }
-        };
-        std::unordered_map<const char *, apply_filter > filters_map=
-        {
-            {"reverb", &apply_reverb}
-        };
-
-        std::unordered_set<const char *> active_filters;
 
 
 
@@ -1219,9 +1216,7 @@ int main(int argc, char* argv[]) {
                 if (closed_id == SDL_GetWindowID(window)) {
                     running = false; // Fermer tout si la fenêtre principale se ferme
                 }
-                //if (closed_id == SDL_GetWindowID(window_ui)) {
-                //    SDL_HideWindow(window_ui); // Masquer simplement l'UI si on clique sur sa croix
-               // }
+
             }
         }
 
@@ -1233,6 +1228,18 @@ int main(int argc, char* argv[]) {
             next_cursor.store( std::min(samples.size() - 1, samples_cursor.load() + buffer.size() ) );
             memcpy(buffer.data(), (const void *)(samples.data()+samples_cursor), (next_cursor - samples_cursor) * sizeof(float) );
 
+            for (size_t k = 0; k <  buffer.size() ; k+=2 )
+            {
+                sample_L = buffer[k];
+                sample_R = buffer[k + 1];
+                for ( auto it = active_filters.begin(); it != active_filters.end();++it)
+                {
+                    filters_map[*it](&sample_L, &sample_R);
+                }
+                buffer[k] = sample_L;
+                buffer[k + 1] = sample_R;
+
+            }
             // feed the new data to the stream. It will queue at the end, and trickle out as the hardware needs more data. 
             SDL_PutAudioStreamData(playback_stream, buffer.data(), (next_cursor - samples_cursor) * sizeof(float) );
             samples_cursor.store( next_cursor );
@@ -1252,10 +1259,6 @@ int main(int argc, char* argv[]) {
             SDL_RenderLine(renderer, (800 / 8) * i, 0, (800 / 8) * i, 600);
             SDL_RenderLine(renderer, 0, (600 / 8) * i, 800, (600 / 8) * i);
         }
-        
-
-
-        
             switch(current_visualizer_style_idx)
             {
                 case 0:
@@ -1422,28 +1425,6 @@ int main(int argc, char* argv[]) {
                     std::thread( [](std::string file, std::vector<float> *samples, SDL_AudioStream* playback_stream )
                     {
                         load_audio_file(file.c_str(),samples);
-
-                        if ( file_loaded.load() == true)
-                        {
-                            SDL_AudioSpec spec{ SDL_AUDIO_F32, channels.load(), sample_rate.load() };
-                            if ( playback_stream != nullptr)
-                            {
-                                SDL_PauseAudioStreamDevice(playback_stream);
-                                SDL_ClearAudioStream(playback_stream);
-                                SDL_DestroyAudioStream(playback_stream);
-                            }
-                            playback_stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL,NULL);
-                            if ( playback_stream == nullptr)
-                            {
-                                error_file_loading_msg = "audio output could not be initialized";
-                            }
-                            else
-                            {
-                                SDL_ResumeAudioStreamDevice(playback_stream);
-                            }
-                        }
-                        SDL_ResumeAudioStreamDevice(playback_stream);
-                        
                     },
                     selected_file_path,&samples,playback_stream).detach();
                 }
@@ -1466,7 +1447,6 @@ int main(int argc, char* argv[]) {
                 }
                 ImGui::Text(m.c_str());
             }
-
 
             if (close_dialog.load() )
             {
@@ -1496,67 +1476,45 @@ int main(int argc, char* argv[]) {
         if ( file_loaded.load() == true)
         {
             ImGui::Separator();
-            if ( file_loaded)
-            {
-                if ( playback.load() == false)
-                {
-                    if ( update_playback_stream.load() == true)
-                    {
-                        SDL_AudioSpec spec{ SDL_AUDIO_F32, channels.load(), sample_rate.load() };
-                        if ( playback_stream != nullptr)
-                        {
-                            SDL_PauseAudioStreamDevice(playback_stream);
-                            SDL_ClearAudioStream(playback_stream);
-                            SDL_DestroyAudioStream(playback_stream);
-                        }
-                        playback_stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL,NULL);
-                        if ( playback_stream == nullptr)
-                        {
-                            error_file_loading_msg = "audio output could not be initialized";
-                        }
-                        else
-                        {
-                            SDL_ResumeAudioStreamDevice(playback_stream);
-                            update_playback_stream.store(false);
-                        }
 
-                    }
-                   ImGui::Text("file ready to play");
+            if ( playback.load() == false )
+            {
+                ImGui::Text("file ready to play");
+            }
+            else
+            { 
+                std::string c = duration_to_hhmmss(current_playing_time);
+                std::string d = std::string("playing file: ")+c+std::string("/")+duration_to_hhmmss(total_playing_time);
+                ImGui::Text(d.c_str());
+                bool change_play_position = ImGui::SliderInt("##playing_position", &play_position, 0, samples.size() - 1,c.c_str(),0);
+                if (!change_play_position)
+                {
+                    play_position = samples_cursor.load();
                 }
-                else
-                { 
-                    std::string c = duration_to_hhmmss(current_playing_time);
-                    std::string d = std::string("playing file: ")+c+std::string("/")+duration_to_hhmmss(total_playing_time);
-                    ImGui::Text(d.c_str());
-                    bool change_play_position = ImGui::SliderInt("##playing_position", &play_position, 0, samples.size() - 1,c.c_str(),0);
-                    if (!change_play_position)
-                    {
-                        play_position = samples_cursor.load();
-                    }
-                    else 
-                    {
-                        audio_cursor_stream.store( play_position );
-                        samples_cursor.store( play_position );
-                        current_playing_time = play_position/sample_rate/channels;
-                    }
-                    
-                    if (samples_cursor.load() < samples.size() )
-                    {
-                        signal_queue.push_back( *(samples.data() + samples_cursor.load() ) );
-                        signal_queue.pop_front();
-                        signal = std::vector<float>(signal_queue.begin(),signal_queue.end() );
-                        ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(1.0f, 0.4f, 0.4f, 1.0f)); // Courbe Rouge
-                        ImGui::PlotLines("Samples", signal.data(), 256,0,"samples",-1.1f, 1.1f, ImVec2(0, 50));
-                        ImGui::PopStyleColor();
-                    }
+                else 
+                {
+                    audio_cursor_stream.store( play_position );
+                    samples_cursor.store( play_position );
+                    current_playing_time = play_position/sample_rate/channels;
+                }
+                
+                if (samples_cursor.load() < samples.size() )
+                {
+                    signal_queue.push_back( *(samples.data() + samples_cursor.load() ) );
+                    signal_queue.pop_front();
+                    signal = std::vector<float>(signal_queue.begin(),signal_queue.end() );
+                    ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(1.0f, 0.4f, 0.4f, 1.0f)); // Courbe Rouge
+                    ImGui::PlotLines("Samples", signal.data(), 256,0,"samples",-1.1f, 1.1f, ImVec2(0, 50));
+                    ImGui::PopStyleColor();
                 }
             }
+            
             ImGui::Spacing(); 
             ImGui::Dummy(ImVec2(0.0f, 25.0f)); 
             ImGui::Separator();
             // Bouton Play
 
-            if (playback.load() == false && ImGuiPlayButton("##PlayBtn", ImVec2(32.0f, 32.0f)) ) 
+            if ( !songs.empty() && playback.load() == false && ImGuiPlayButton("##PlayBtn", ImVec2(32.0f, 32.0f)) ) 
             {
                 play_position = 0;
                 last_audio_cursor_stream = 0;
@@ -1564,37 +1522,28 @@ int main(int argc, char* argv[]) {
                 samples_cursor = 0;
                 next_cursor = 0;
                 SDL_ResumeAudioStreamDevice(playback_stream);
-                if ( current_visualizer_style_idx == 2)
+                size_t song_hash = songs.begin()->first ;
+                song_hash = song_hash_selected != -1 ? song_hash = song_hash_selected : song_hash;
+                update_data_from_loaded_file(song_hash);
+                SDL_AudioSpec spec{ SDL_AUDIO_F32, channels.load(), sample_rate.load() };
+                if ( playback_stream != nullptr)
                 {
-                    SDL_ResumeAudioStreamDevice(capture_stream);
-                }
-                
-                playback.store(true);
-                total_playing_time = samples.size()/channels / sample_rate;
-                start_playing_time = now();
-                
-            }
-
-            if (playback.load() == false)
-            {
-                ImGui::SameLine();
-                if (ImGuiStopButton("##AudioStop", ImVec2(32.0f, 32.0f))) 
-                {
-                    last_audio_cursor_stream = 0;
-                    audio_cursor_stream = 0;
-                    samples_cursor = 0;
-                    next_cursor = 0;
                     SDL_PauseAudioStreamDevice(playback_stream);
-                    SDL_ClearAudioStream(playback_stream); 
-                    if ( current_visualizer_style_idx == 2)
-                    {
-                        SDL_PauseAudioStreamDevice(capture_stream);
-                        SDL_ClearAudioStream(capture_stream); 
-                    }
-                    playback.store(false);
+                    SDL_ClearAudioStream(playback_stream);
+                    SDL_DestroyAudioStream(playback_stream);
+                }
+                playback_stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL,NULL);
+                if ( playback_stream == nullptr)
+                {
+                    error_file_loading_msg = "audio output could not be initialized";
+                }
+                else
+                {
+                    SDL_ResumeAudioStreamDevice(playback_stream);
+                    playback.store(true);
                 }
             }
-            else
+            ImGui::SameLine();
             if ( ImGuiStopButton("##AudioStop", ImVec2(32.0f, 32.0f))) 
             {
                 last_audio_cursor_stream = 0;
@@ -1603,11 +1552,6 @@ int main(int argc, char* argv[]) {
                 next_cursor = 0;
                 SDL_PauseAudioStreamDevice(playback_stream);
                 SDL_ClearAudioStream(playback_stream); 
-                if ( current_visualizer_style_idx == 2)
-                {
-                    SDL_PauseAudioStreamDevice(capture_stream);
-                    SDL_ClearAudioStream(capture_stream); 
-                }
                 playback.store(false);
             }
 
@@ -1624,7 +1568,7 @@ int main(int argc, char* argv[]) {
                 ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
                 
                 // Mettre en surbrillance si cet ID est sélectionné
-                if (id_selectionne == id) {
+                if (song_hash_selected == id) {
                     flags |= ImGuiTreeNodeFlags_Selected;
                 }
 
@@ -1639,12 +1583,7 @@ int main(int argc, char* argv[]) {
                 // 3. Gestion de la sélection au clic
                 // !ImGui::IsItemToggledOpen() évite de sélectionner l'élément si on clique juste sur la flèche
                 if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
-                    id_selectionne = id;
-
-                    if ( playback.load( ) == false )
-                    {
-                        update_data_from_loaded_file(id_selectionne);
-                    }
+                    song_hash_selected = id;
                 }
 
                 // --- DEBUT DU MENU CONTEXTUEL (CLIC DROIT) ---
@@ -1654,12 +1593,7 @@ int main(int argc, char* argv[]) {
                     // Option de sélection rapide au clic droit
                     if (ImGui::MenuItem("Sélectionner")) 
                     {
-                        id_selectionne = id;
-
-                        if ( playback.load( ) == false )
-                        {
-                            update_data_from_loaded_file(id_selectionne);
-                        }
+                        song_hash_selected = id;
                     }
                     
                     ImGui::Separator();
@@ -1692,8 +1626,8 @@ int main(int argc, char* argv[]) {
                 songs.erase(id_a_supprimer);
                 
                 // Si l'élément supprimé était celui sélectionné, on réinitialise la sélection
-                if (id_selectionne == id_a_supprimer) {
-                    id_selectionne = 0; 
+                if (song_hash_selected == id_a_supprimer) {
+                    song_hash_selected = -1; 
                 }
                 
                 id_a_supprimer = -1; // Réinitialisation
